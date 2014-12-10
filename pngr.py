@@ -44,10 +44,12 @@ class PngReader:
         if not self.is_valid():
             raise PngError("file {} is corrupt or not a PNG".format(\
                 self.png_path))
+        
     # For using the 'with' statement to initialize
     def __enter__(self):
         self.open_png()
         return self
+    
     # For using the 'with' statement to initialize
     def __exit__(self, type, value, traceback):
         self.close_png()
@@ -119,7 +121,6 @@ class PngReader:
             return True
             
 
-
 # Stores organized data for a single chunk of a PNG.
 # Superclass for specific chunk types.
 # The 'properties' dict is used to store information from the chunk which
@@ -139,17 +140,13 @@ class PngChunk:
 
     # Must be passed the entire binary chunk as a list
     def __init__(self, c_bytes):
-        self._bin = c_bytes
-        #self._bin.append(c_bytes[:4])
-        #self._bin.append(c_bytes[4:8])
-        #self._bin.append(c_bytes[8:-4])
-        #self._bin.append(c_bytes[-4:])
         self.properties = {}
-        self.properties['Length'] = int.from_bytes(self._bin[0], 'big')
-        self.properties['Type'] = self._bin[1].decode()
-        self.properties['Data'] = self._bin[2]
-        self.properties['CRC'] = self._bin[3]
+        self.properties['Length'] = int.from_bytes(c_bytes[0], 'big')
+        self.properties['Type'] = c_bytes[1].decode()
+        self.properties['Data'] = c_bytes[2]
+        self.properties['CRC'] = c_bytes[3]
         self.properties['Meta'] = {}
+        self.meta = self.properties['Meta']
 
     # Simple getter for a given property
     def get_property(self, property_name=None):
@@ -158,11 +155,11 @@ class PngChunk:
         return self.properties[property_name]
 
     # Getter for the binary form of the entire chunk
-    def get_binary(self):
-        bindat = b''
-        for v in self._bin:
-            bindat += v
-        return bindat
+#    def get_binary(self):
+#        bindat = b''
+#        for v in self._bin:
+#            bindat += v
+#        return bindat
 
     # Getter for metadata; only useful for subclasses
     def get_meta(self, meta_property=None):
@@ -180,14 +177,16 @@ class IHDR(PngChunk):
         if not isinstance(genchunk, PngChunk):
             raise PngError("expected PngChunk, but {} found"\
                            .format(type(genchunk).__name__))
-        self._bin = genchunk._bin
+#        self._bin = genchunk._bin
         self.properties = genchunk.properties
         self.meta = self.properties['Meta']
-        self.meta['Width'] = int.from_bytes(self._bin[2][:4], 'big')
-        self.meta['Height'] = int.from_bytes(self._bin[2][4:8], 'big')
-        self.meta['Bit depth'] = self._bin[2][8]
-        self.meta['Color type'] = self._bin[2][9]
-        self.meta['Interlace'] = self._bin[2][-1]
+        self.meta['Width'] = int.from_bytes(self.properties['Data'][:4],
+                                            'big')
+        self.meta['Height'] = int.from_bytes(self.properties['Data'][4:8],
+                                             'big')
+        self.meta['Bit depth'] = self.properties['Data'][8]
+        self.meta['Color type'] = self.properties['Data'][9]
+        self.meta['Interlace'] = self.properties['Data'][-1]
 
 
 # Stores parsed data from an IDAT chunk.
@@ -199,7 +198,7 @@ class IDAT(PngChunk):
         if not isinstance(genchunk, PngChunk):
             raise PngError("expected PngChunk, but {} found"\
                            .format(type(genchunk).__name__))
-        self._bin = genchunk._bin
+#        self._bin = genchunk._bin
         self.properties = genchunk.properties
         self.meta = self.properties['Meta']
 
@@ -287,7 +286,6 @@ class PngData:
 # - only chunks which affect the reading/writing of IDAT/pixel data would need
 #   to be parsed
 # - only critical info/meta-data would be stored (and binary data)
-# - work with numeric pixel values instead of printable ascii hex
 # - maybe a gateway to stegosaurus?
 # filter decoding 'methods' are present in pngr_test. move them here, break
 #   the algorithms out, make filter and unfilter methods on data class
@@ -301,4 +299,6 @@ class PngData:
 #   doubles decomp'd data length, which is already longer than IDAT. working
 #   with data in place as much as possible would be wise.
 # the above may be complicated in the case of Adam7 interlacing
+# docstrings (and function annotations) are useful. use them, at least so that
+#   comments stop appearing as help() entries for this module.
 ##
