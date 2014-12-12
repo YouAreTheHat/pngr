@@ -12,7 +12,7 @@
 #                                                               #
 ### ### ### ### ### ### ### #### #### ### ### ### ### ### ### ###
 
-import math
+import math, zlib
 
 # A custom error raised for issues with this module only.
 class PngError(Exception):
@@ -123,15 +123,10 @@ class PngReader:
 
 # Stores organized data for a single chunk of a PNG.
 # Superclass for specific chunk types.
-# The 'properties' dict is used to store information from the chunk which
-# might be retrieved and/or analyzed. The keys should be a string of the
-# standard name of the property, with the first letter capitalized (e.g.,
-# 'Length'). Values should be stored in their most useful form (e.g., Length
-# should be an int).
-# Subclasses should extend the 'Meta' dict with chunk-specific properties
-# (e.g., IHDR adds 'Width', 'Height', etc).
-# The '_bin' list is not intended to be accessed except by 'get_binary' or
-# by subclass functions; it should never be used outside of the (sub)class.
+# The 'meta' dict is sued to stores the store the attributes of the chunk
+# which the chunk itself stores (length, type, CRC).
+# Subclasses should extend the 'info' dict with the parsed information the
+# chunk actually carries (e.g., IHDR adds 'Width', 'Height', etc).
 class PngChunk:
     """    !!! WIP !!!
 
@@ -140,67 +135,97 @@ class PngChunk:
 
     # Must be passed the entire binary chunk as a list
     def __init__(self, c_bytes):
-        self.properties = {}
-        self.properties['Length'] = int.from_bytes(c_bytes[0], 'big')
-        self.properties['Type'] = c_bytes[1].decode()
-        self.properties['Data'] = c_bytes[2]
-        self.properties['CRC'] = c_bytes[3]
-        self.properties['Meta'] = {}
-        self.meta = self.properties['Meta']
+        self.meta = {}
+        self.meta['Length'] = int.from_bytes(c_bytes[0], 'big')
+        self.meta['Type'] = c_bytes[1].decode()
+        self.meta['CRC'] = c_bytes[3]
+        self.data = bytearray(c_bytes[2])
+        self.info = {}
 
-    # Simple getter for a given property
-    def get_property(self, property_name=None):
+    # Getter for chunk meta-data
+    def get_meta(self, property_name=None):
+        """\tReturns dict of chunk length, type, and CRC.
+
+        Specify a key to return only that value."""
         if property_name is None:
-            return self.properties
-        return self.properties[property_name]
+            return self.meta
+        return self.meta[property_name]
 
-    # Getter for the binary form of the entire chunk
-#    def get_binary(self):
-#        bindat = b''
-#        for v in self._bin:
-#            bindat += v
-#        return bindat
+    # Getter for raw data
+    def get_data(self):
+        """\tReturns the unparsed data contained by the chunk.
 
-    # Getter for metadata; only useful for subclasses
-    def get_meta(self, meta_property=None):
-        if meta_property is None:
-            return self.properties['Meta']
-        return self.properties['Meta'][meta_property]
+        This does not include the length, type, or CRC fields.
+        Use get_raw() for a binary version of the entire chunk.
+        WARNING: may be up to 2^32 bytes long, use with caution"""
+        return self.data
+
+    # Getter for parsed contents; most useful for subtypes
+    def get_info(self, info_name=None):
+        """\tReturns parsed chunk data as dict (may be empty).
+
+        For known chunk types, this should return their stored information
+        in human-readable form."""
+        if info_name is None:
+            return self.info
+        return self.info[info_name]
+
+    # Getter for the binary data of the entire chunk
+    def get_raw(self, buffer: '4 to 4294967308'=None):
+        """\tReturns generator over binary chunk, <buffer> bytes at a time.
+
+        WARNING: may be over 2^32 bytes long w/o buffer, use with caution"""
+        ## placeholder. needs generator function working
+        pass
+
+    # Makes generator over binary form of chunk
+    def _raw_generator(self, buffer, start=0):
+        pass
+
+    # Sets the 'Length' to the actual length of its raw data
+    def set_length(self):
+        """\tSet 'Length' to length of raw data.
+
+        Returns difference between new and old lengths."""
+        if self.meta('Length') != len(self.raw):
+            oldlen = self.meta('Length')
+            self.meta('Length') = len(self.raw)
+            return (self.meta('Length') - oldlen)
+        return 0
 
 
 # Stores parsed data from the IHDR chunk.
-# PngData objects can use IHDR 'Meta' dict to extract image properties
+# PngData objects can use IHDR info dict to extract image properties
 class IHDR(PngChunk):
 
-    # IHDR can extract all of its metadata at init
+    # IHDR can extract all of its info at init
     def __init__(self, genchunk):
         if not isinstance(genchunk, PngChunk):
             raise PngError("expected PngChunk, but {} found"\
                            .format(type(genchunk).__name__))
-#        self._bin = genchunk._bin
-        self.properties = genchunk.properties
-        self.meta = self.properties['Meta']
-        self.meta['Width'] = int.from_bytes(self.properties['Data'][:4],
-                                            'big')
-        self.meta['Height'] = int.from_bytes(self.properties['Data'][4:8],
-                                             'big')
-        self.meta['Bit depth'] = self.properties['Data'][8]
-        self.meta['Color type'] = self.properties['Data'][9]
-        self.meta['Interlace'] = self.properties['Data'][-1]
+        self.meta = genchunk.meta
+        self.data = genchunk.data
+        self.info = genchunk.info
+        self.info['Width'] = int.from_bytes(self.data[:4], 'big')
+        self.info['Height'] = int.from_bytes(self.data[4:8], 'big')
+        self.info['Bit depth'] = self.data[8]
+        self.info['Color type'] = self.data[9]
+        self.info['Interlace'] = self.data[-1]
 
 
 # Stores parsed data from an IDAT chunk.
 class IDAT(PngChunk):
 
-    # Init does not parse metadata because info from other chunks (IHDR and
-    # possibly PLTE) is needed to understand the formatting
+    # Init does not parse info because info from other chunks (IHDR and
+    # possibly others) is needed to understand the formatting.
+    # Plus, it's kind of a large and memory-intensive process.
     def __init__(self, genchunk):
         if not isinstance(genchunk, PngChunk):
             raise PngError("expected PngChunk, but {} found"\
                            .format(type(genchunk).__name__))
-#        self._bin = genchunk._bin
-        self.properties = genchunk.properties
-        self.meta = self.properties['Meta']
+        self.meta = genchunk.meta
+        self.data = genchunk.data
+        self.info = genchunk.info
 
 
 class PLTE(PngChunk):
@@ -211,12 +236,11 @@ class IEND(PngChunk):
     pass
 
 
-# Stores PngChunks and displays and analyzes their attributes.
+# Stores PngChunks and analyzes their attributes.
 # Acts as an object representation of the PNG file, since it holds all of the
 # file's data in chunk form.
-# Generic PngChunks should be passed to it at initialization and through the
-# 'addchunk' method; it will convert them to an appropriate subtype if one is
-# defined.
+# Generic PngChunks should be passed to it  through the 'addchunk' method;
+# it will convert them to an appropriate subtype if one is defined.
 class PngData:
     """    !!! WIP !!!
 
@@ -247,14 +271,11 @@ class PngData:
                   3: (1, True),
                   4: (2, False),
                   6: (4, None)}
-    
-    # May optionally leave out PNG signature since it is identical for all
-    # PNGs (and any chunks making it to this class should always be from a
-    # proper PNG anyway).
-    def __init__(self, add_sig=True):
-        self.signature = None
-        if add_sig:
-                self.signature = b'\x89PNG\r\n\x1a\n'
+
+    # Static PNG signature; it will be needed when writing
+    signature = b'\x89PNG\r\n\x1a\n'
+
+    def __init__(self):
         self.chunks = []
         self.ihdr_pos = None
         self.plte_pos = None
@@ -276,24 +297,26 @@ class PngData:
 # make a PngData method for converting chunks to their subtypes, or implement
 #   that functionality in addchunk()
 # make the above method record the position of the header and palette, or just
-#   their meta-data
+#   their info
 # ensure a PngData obj can pass IHDR and PLTE data to its IDAT(s) for scanline
 #   organization
 # project purpose has been changed: the goal is now to make a PNG decoder,
 #   including parsing, modification, and re-writing
 # for the above goal:
-# - data class would hold meta-data attributes
+# - data class would hold info attributes
 # - only chunks which affect the reading/writing of IDAT/pixel data would need
-#   to be parsed
-# - only critical info/meta-data would be stored (and binary data)
+#   to be parsed (others are optional)
+# - only critical info/data would need to be stored
 # - maybe a gateway to stegosaurus?
 # filter decoding 'methods' are present in pngr_test. move them here, break
-#   the algorithms out, make filter and unfilter methods on data class
+#   the algorithms out, adjust interface, add proper methods to data class
 # make chunk subtypes able to init with bin arrays from reader
 # OR
 # eliminate subtypes and meta array, trust 'Type' for chunk typing, have data
 #   class parse and store information to avoid redundant storage. this is
 #   largely necessary for cat'ing IDATs and using IHDR and PLTE info anyway
+# for the above, only certain data has to be stored; chunks can still be
+#   mostly responsible for themselves.
 # keep mem usage in mind. at minimum, entire file is in mem. decompressing
 #   IDAT(s) all at once nearly doubles that. copying decomp'd data to array
 #   doubles decomp'd data length, which is already longer than IDAT. working
@@ -301,4 +324,6 @@ class PngData:
 # the above may be complicated in the case of Adam7 interlacing
 # docstrings (and function annotations) are useful. use them, at least so that
 #   comments stop appearing as help() entries for this module.
+# pngr_test also has a generator method for buffered reading of binary chunks,
+#   so move that here (modifying as necessary)
 ##

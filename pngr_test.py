@@ -10,6 +10,8 @@ import pngr
 import math
 import zlib
 
+## The following must be modified to fit the new interface of PngChunk
+"""
 d = []
    
 with pngr.PngReader(os.path.join(os.getcwd(), "gradient3.png")) as p:
@@ -36,6 +38,7 @@ lines = []
 for i in range(0, len(dcmp), ((px_depth * px_w) + 1)):
     lines.append(dcmp[i:i+((px_depth * px_w) + 1)])
 
+## For parsing filters
 for i in range(len(lines)):
     l = bytearray(lines[i])
     if l[0] == 0: #filter 'none'
@@ -91,10 +94,43 @@ for i in range(len(lines)):
             l[j] = (l[j] + paeth)%256
     l = l[1:]
     lines[i] = l
-    
+##
+"""
 
+## Tests for generator function (reading data with buffer)
+mylist = [25, "WORD", bytearray(16), b'foop']
 
-## These are important!
+def gen_func(buf):
+    num = 0
+    l = 12 + len(mylist[2])
+    while num < l:
+        result, toread = b'', buf
+        while toread > 0:
+            b_l = len(result)
+            if num < 4:
+                result += mylist[0].to_bytes(4, 'big')[num:num + toread]
+            elif num >= 4 and num < 8:
+                result += bytes(mylist[1], 'utf8')[num - 4:num - 4 + toread]
+            elif num >= 8 and num < (l - 4):
+                result += mylist[2][num - 8:num - 8 + toread]
+            elif num - l + toread < 0:
+                result += mylist[3][num - l:num - l + toread]
+            else:
+                result += mylist[3][num - l:]
+                toread = 0
+            num += len(result) - b_l
+            toread -= len(result) - b_l
+        yield result
+            
+def dothething(buffer):
+    if buffer < 4:
+        print("Buffer too small!")
+        return
+    for somebytes in gen_func(buffer):
+        print(somebytes)
+##
+
+## For formatting as hex
 #h = ["{:02x}".format(i).upper() for i in a.get_binary()]
 #for i in range(math.ceil(len(h)/24)):
 #    print(' '.join(h[i * 24:(i + 1) * 24]))
