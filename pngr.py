@@ -152,13 +152,14 @@ class PngChunk:
         return self.meta[property_name]
 
     # Getter for raw data
-    def get_data(self):
-        """\tReturns the unparsed data contained by the chunk.
+    def get_data(self, buffer=None):
+        """\tReturns generator over unparsed data, <buffer> bytes at a time.
+        Defaults to entire data field at once.
 
         This does not include the length, type, or CRC fields.
         Use get_raw() for a binary version of the entire chunk.
-        WARNING: may be up to 2^32 bytes long, use with caution"""
-        return self.data
+        WARNING: may be up to 2^31 bytes long w/o buffer, use with caution"""
+        return self._raw_generator(buffer, 8, -4)
 
     # Getter for parsed contents; most useful for subtypes
     def get_info(self, info_name=None):
@@ -171,16 +172,47 @@ class PngChunk:
         return self.info[info_name]
 
     # Getter for the binary data of the entire chunk
-    def get_raw(self, buffer: '4 to 4294967308'=None):
+    def get_raw(self, buffer: '4 to 2147483659'=None):
         """\tReturns generator over binary chunk, <buffer> bytes at a time.
+        Defaults to entire chunk at once.
 
-        WARNING: may be over 2^32 bytes long w/o buffer, use with caution"""
-        ## placeholder. needs generator function working
-        pass
+        WARNING: may be over 2^31 bytes long w/o buffer, use with caution"""
+        if buffer is not None:
+            if buffer < 4:
+                raise PngError("buffer length out of range")
+        return self._raw_generator(buffer)
 
-    # Makes generator over binary form of chunk
-    def _raw_generator(self, buffer, start=0):
-        pass
+    # Makes generator over binary form of chunk (or part of chunk)
+    def _raw_generator(self, buffer, start=0, end=0):
+        l = 12 + len(self.data)
+        if end < 0:
+            l += end
+        if start >= 0:
+            num = start
+        elif abs(start) <= l:
+            num = l + start
+        if buffer is None:
+            buffer  = l
+        while num < l:
+            result, toread = b'', buffer
+            while toread > 0:
+                b_l = len(result)
+                if num < 4:
+                    result += self.meta['Length'].to_bytes(4, 'big')\
+                              [num:num + toread]
+                elif num >= 4 and num < 8:
+                    result += bytes(self.meta['Type'], 'utf8')\
+                              [num - 4:num - 4 + toread]
+                elif num >= 8 and num < (l - 4):
+                    result += self.data[num - 8:num - 8 + toread]
+                elif num - l + toread < 0:
+                    result += self.meta['CRC'][num - l:num - l + toread]
+                else:
+                    result += self.meta['CRC'][num - l:]
+                    toread = 0
+                num += len(result) - b_l
+                toread -= len(result) - b_l
+            yield result
 
     # Sets the 'Length' to the actual length of its raw data
     def set_length(self):
@@ -284,37 +316,120 @@ class PngData:
         if not isinstance(chunk, PngChunk):
             raise PngError("expected PngChunk, but {} found"\
                            .format(type(chunk).__name__))
-        # placeholder; convert chunk to an appropriate subclass (if available)
-        # before appending it.
-        # also record position if IHDR or PLTE chunk
-        self.chunks.append(chunk)
+        ctype = chunk.get_meta('Type')
+        if ctype in self.chunktypes.keys():
+            if ctype == 'IHDR':
+                self.ihdr_pos = len(self.chunks)
+            elif ctype == 'PLTE':
+                self.plte_pos = len(self.chunks)
+            self.chunks.append(self.chunktypes[ctype](chunk))
+        else:
+            self.chunks.append(chunk)
+
+    # Rough unfiltering method.
+    # Currently works naively on an array of scanlines.
+    # No support for interlacing. Requires precalculated pixel depth. May
+    # work improperly on color type 0 for bit depths less than 8.
+    def _unfilter(self, lines, px_depth):
+        for i in range(len(lines)):
+            l = bytearray(lines[i])
+            if l[0] == 0: #filter 'none'
+                pass
+            elif l[0] == 1: #filter 'sub'
+                for j in range((1 + px_depth), len(l)):
+                    l[j] = (l[j] + l[j - px_depth])%256
+            elif l[0] == 2: #filter 'up'
+                for j in range(1, len(l)):
+                    if i == 0:
+                        prior = 0
+                    else:
+                        prior = lines[i - 1][j - 1]
+                    l[j] = (l[j] + prior)%256
+            elif l[0] == 3: #filter 'average'
+                for j in range(1, len(l)):
+                    if j in range(1, (1 + px_depth)):
+                        prev = 0
+                    else:
+                        prev = l[j - px_depth]
+                    if i == 0:
+                        prior = 0
+                    else:
+                        prior = lines[i - 1][j - 1]
+                    l[j] = (l[j] + math.floor((prev + prior)/2))%256
+            elif l[0] == 4: #filter 'Paeth'
+                for j in range(1, len(l)):
+                    flg = False
+                    if j in range(1, (1 + px_depth)):
+                        prev = 0
+                        flg = True
+                    else:
+                        prev = l[j - px_depth]
+                    if i == 0:
+                        prior = 0
+                        flg = True
+                    else:
+                        prior = lines[i - 1][j - 1]
+                    if flg:
+                        prevpri = 0
+                    else:
+                        prevpri = lines[i - 1][(j - 1) - px_depth]
+                    p_p = prev + prior + prevpri
+                    p_d = []
+                    for p_v in [prev, prior, prevpri]:
+                        p_d.append(math.abs(p_p - p_v))
+                    if p_d[0] <= p_d[1] and p_d[0] <= p_d[2]:
+                        paeth = prev
+                    elif p_d[1] <= p_d[2]:
+                        paeth = prior
+                    else:
+                        paeth = prevpri
+                    l[j] = (l[j] + paeth)%256
+            l = l[1:]
+            lines[i] = l
+        return lines
+
+    # Rough method for extracting pixel data from IDATs
+    # Currently works naively on all data at once, returns array. No support
+    # for interlacing. May work improperly on color type 0 for bit depths less
+    # than 8.
+    def get_scanlines(self):
+        info = self.chunks[self.ihdr_pos].get_info()
+        if info['Interlace']:
+            raise PngError("interlacing not supported")
+        c_count = self.colortypes[info['Color type']][0]
+        c_depth = max([info['Bit depth']//8, 1])
+        p_depth = c_depth * c_count
+        p_w, p_h = info['Width'], info['Height']
+        cmp = b''
+        for chunk in [c for c in self.chunks if isinstance(c, IDAT)]:
+            for d in chunk.get_data():
+                cmp += d
+        dcmp = zlib.decompress(cmp)
+        scanlines = []
+        for i in range(0, len(dcmp), ((p_depth * p_w) + 1)):
+            scanlines.append(dcmp[i:i + ((p_depth * p_w) + 1)])
+        scanlines  = self._unfilter(scanlines, p_depth)
+        return scanlines
 
 
 ## Notes
 # pngr_test.py has some testing, basic implementations, etc
 # add PngChunk subclasses for each critical type (and hopefully important
 #   ancillary types as well). use them for analyzing chunks more effectively.
-# make a PngData method for converting chunks to their subtypes, or implement
-#   that functionality in addchunk()
-# make the above method record the position of the header and palette, or just
-#   their info
-# ensure a PngData obj can pass IHDR and PLTE data to its IDAT(s) for scanline
-#   organization
 # project purpose has been changed: the goal is now to make a PNG decoder,
 #   including parsing, modification, and re-writing
 # for the above goal:
-# - data class would hold info attributes
+# - data class would hold info attributes (probably)
 # - only chunks which affect the reading/writing of IDAT/pixel data would need
 #   to be parsed (others are optional)
 # - only critical info/data would need to be stored
 # - maybe a gateway to stegosaurus?
-# filter decoding 'methods' are present in pngr_test. move them here, break
-#   the algorithms out, adjust interface, add proper methods to data class
 # make chunk subtypes able to init with bin arrays from reader
+#   ...because reasons?
 # OR
 # eliminate subtypes and meta array, trust 'Type' for chunk typing, have data
-#   class parse and store information to avoid redundant storage. this is
-#   largely necessary for cat'ing IDATs and using IHDR and PLTE info anyway
+#   class parse and store information to avoid redundant storage. this may
+#   be necessary for cat'ing IDATs and using IHDR and PLTE info anyway
 # for the above, only certain data has to be stored; chunks can still be
 #   mostly responsible for themselves.
 # keep mem usage in mind. at minimum, entire file is in mem. decompressing
@@ -322,8 +437,14 @@ class PngData:
 #   doubles decomp'd data length, which is already longer than IDAT. working
 #   with data in place as much as possible would be wise.
 # the above may be complicated in the case of Adam7 interlacing
-# docstrings (and function annotations) are useful. use them, at least so that
-#   comments stop appearing as help() entries for this module.
-# pngr_test also has a generator method for buffered reading of binary chunks,
-#   so move that here (modifying as necessary)
+# (de)compression, making scanlines, and (un)filtering may also benefit from
+#   generators/buffered IO (or be impossible - look into that)
+# scanline and unfiltering functions are very rough; revise to ensure they are
+#   compatible withh color types and bit depths. also include a buffered read
+#   by way of a generator.
+# for above, carefully consider how decompression and unfiltering will work;
+#   the compressed data must be at least 2 scanlines long to be useful for
+#   unfiltering.
+# if this will work as a proper PNG decoder, ensure that all requirements from
+#   the PNG standard are followed.
 ##
